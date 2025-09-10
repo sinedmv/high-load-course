@@ -33,3 +33,10 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Secrets ###
+http-client.env.json
+
+### Data from containers ###
+grafana/data
+prometheus/data
