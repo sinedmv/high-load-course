@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
+import ru.quipy.PaymentMetrics
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
@@ -13,6 +14,7 @@ import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.TimeUnit
 
 
 // Advice: always treat time as a Duration
@@ -21,6 +23,7 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
+    private val paymentMetrics: PaymentMetrics
 ) : PaymentExternalSystemAdapter {
 
     companion object {
@@ -41,7 +44,8 @@ class PaymentExternalSystemAdapterImpl(
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
-        logger.warn("[$accountName] Submitting payment request for payment $paymentId")
+        val startTime = System.currentTimeMillis();
+        logger.warn("[$accountName] Submitting payment request for payment $paymentId, avgProcessingTime: $requestAverageProcessingTime")
 
         val transactionId = UUID.randomUUID()
 
@@ -96,6 +100,8 @@ class PaymentExternalSystemAdapterImpl(
             }
         }
         finally {
+            val duration = System.currentTimeMillis() - startTime;
+            paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
             ongoingWindow.release();
         }
     }

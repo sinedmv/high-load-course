@@ -62,7 +62,6 @@ class APIController {
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
         paymentMetrics.incomingRequestsCounter.increment()
-        val startTime = System.currentTimeMillis()
 
         val paymentId = UUID.randomUUID()
         val order = orderRepository.findById(orderId)?.let {
@@ -72,10 +71,6 @@ class APIController {
 
 
         val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-
-        val duration = System.currentTimeMillis() - startTime
-        paymentMetrics.paymentDurationTimer.record(duration, TimeUnit.MILLISECONDS)
-
         return PaymentSubmissionDto(createdAt, paymentId)
     }
 
