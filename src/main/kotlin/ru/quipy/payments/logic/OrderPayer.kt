@@ -74,20 +74,21 @@ class OrderPayer {
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         val createdAt = System.currentTimeMillis()
-        val createdEvent = paymentESService.create {
-            it.create(
-                paymentId,
-                orderId,
-                amount
-            )
-        }
-        logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
-        paymentExecutor.submit { // Не факт, что поток возьмет сразу. Видимо, в этом и есть проблема
+        paymentExecutor.submit {
+            val createdEvent = paymentESService.create {
+                it.create(
+                    paymentId,
+                    orderId,
+                    amount
+                )
+            }
+            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
+
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
             val duration = System.currentTimeMillis() - createdAt;
             paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
-        } // Нужно либо увеличить кол-во потоков/ оптимизировать процессы внутри текущей лямбды или всего этого метода
+        }
         return createdAt
     }
 }
