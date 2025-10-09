@@ -3,16 +3,20 @@ package ru.quipy.apigateway
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import ru.quipy.PaymentMetrics
+import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
 
 @RestController
 class APIController {
-
+    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(64, Duration.ofSeconds(6))
     val logger: Logger = LoggerFactory.getLogger(APIController::class.java)
 
     @Autowired
@@ -60,8 +64,13 @@ class APIController {
     }
 
     @PostMapping("/orders/{orderId}/payment")
-    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): PaymentSubmissionDto {
+    fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
         paymentMetrics.incomingRequestsCounter.increment()
+        if (!slidingWindowRateLimiter.tick()) {
+            return ResponseEntity.status(429)
+                .header("Retry-After", "5")
+                .build();
+        }
 
         val paymentId = UUID.randomUUID()
         val order = orderRepository.findById(orderId)?.let {
@@ -71,7 +80,7 @@ class APIController {
 
 
         val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-        return PaymentSubmissionDto(createdAt, paymentId)
+        return ResponseEntity.ok(PaymentSubmissionDto(createdAt, paymentId))
     }
 
     class PaymentSubmissionDto(
