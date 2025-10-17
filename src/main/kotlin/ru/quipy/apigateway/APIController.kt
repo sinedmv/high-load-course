@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import ru.quipy.PaymentMetrics
 import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.orders.repository.OrderRepository
 import ru.quipy.payments.logic.OrderPayer
 import java.time.Duration
@@ -16,7 +17,6 @@ import java.util.concurrent.TimeUnit
 
 @RestController
 class APIController {
-    private val slidingWindowRateLimiter = SlidingWindowRateLimiter(64, Duration.ofSeconds(6))
     val logger: Logger = LoggerFactory.getLogger(APIController::class.java)
 
     @Autowired
@@ -66,11 +66,6 @@ class APIController {
     @PostMapping("/orders/{orderId}/payment")
     fun payOrder(@PathVariable orderId: UUID, @RequestParam deadline: Long): ResponseEntity<PaymentSubmissionDto> {
         paymentMetrics.incomingRequestsCounter.increment()
-        if (!slidingWindowRateLimiter.tick()) {
-            return ResponseEntity.status(429)
-                .header("Retry-After", "5")
-                .build();
-        }
 
         val paymentId = UUID.randomUUID()
         val order = orderRepository.findById(orderId)?.let {
@@ -79,8 +74,15 @@ class APIController {
         } ?: throw IllegalArgumentException("No such order $orderId")
 
 
-        val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
-        return ResponseEntity.ok(PaymentSubmissionDto(createdAt, paymentId))
+        try {
+            val createdAt = orderPayer.processPayment(orderId, order.price, paymentId, deadline)
+            return ResponseEntity.ok(PaymentSubmissionDto(createdAt, paymentId))
+        }
+        catch (e: TooManyRequestsWithRetryAfterException) {
+            return ResponseEntity.status(429)
+                .header("Retry-After", e.getRetryAfter().toString())
+                .build();
+        }
     }
 
     class PaymentSubmissionDto(

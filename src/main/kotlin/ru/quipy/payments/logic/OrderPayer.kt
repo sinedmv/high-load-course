@@ -9,12 +9,16 @@ import org.springframework.stereotype.Service
 import ru.quipy.PaymentMetrics
 import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
 import ru.quipy.common.utils.NamedThreadFactory
+import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 @Service
 class OrderPayer {
@@ -31,6 +35,14 @@ class OrderPayer {
 
     @Autowired
     private lateinit var paymentService: PaymentService
+
+    private val slidingWindowRateLimiter: SlidingWindowRateLimiter by lazy {
+        val accountProperties = paymentService.getAllAccountsProperties()
+        val window = accountProperties.minOf { it.averageProcessingTime }
+            .toMillis()
+            .div(1000.0)
+        SlidingWindowRateLimiter(accountProperties.minOf { it.rateLimitPerSec } * window.roundToLong(), accountProperties.minOf { it.averageProcessingTime })
+    }
 
     private val paymentExecutor = ThreadPoolExecutor(
         16,
@@ -73,6 +85,14 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+        if (!slidingWindowRateLimiter.tick()) {
+            val accountProperties = paymentService.getAllAccountsProperties()
+            val retryAfter = accountProperties.minOf { it.averageProcessingTime }
+                .toMillis()
+                .div(1000.0)
+            throw TooManyRequestsWithRetryAfterException(retryAfter.roundToInt())
+        }
+
         val createdAt = System.currentTimeMillis()
 
         paymentExecutor.submit {

@@ -26,4 +26,12 @@ class PaymentSystemImpl(
             account.performPaymentAsync(paymentId, amount, paymentStartedAt, deadline)
         }
     }
+
+    override fun getAllAccountsProperties(): List<PaymentAccountProperties> {
+        val listOfProperties = mutableListOf<PaymentAccountProperties>()
+        for (account in paymentAccounts) {
+            listOfProperties.add(account.getAccountProperties())
+        }
+        return listOfProperties
+    }
 }
