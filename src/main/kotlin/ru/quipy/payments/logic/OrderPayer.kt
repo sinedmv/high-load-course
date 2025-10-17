@@ -36,20 +36,12 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
-    private val slidingWindowRateLimiter: SlidingWindowRateLimiter by lazy {
-        val accountProperties = paymentService.getAllAccountsProperties()
-        val window = accountProperties.minOf { it.averageProcessingTime }
-            .toMillis()
-            .div(1000.0)
-        SlidingWindowRateLimiter(accountProperties.minOf { it.rateLimitPerSec } * window.roundToLong(), accountProperties.minOf { it.averageProcessingTime })
-    }
-
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(8_000),
+        LinkedBlockingQueue(paymentService.getAllAccountsProperties().maxOf { it.parallelRequests }),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
@@ -85,7 +77,7 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-        if (!slidingWindowRateLimiter.tick()) {
+        if (paymentExecutor.queue.remainingCapacity() == 0) {
             val accountProperties = paymentService.getAllAccountsProperties()
             val retryAfter = accountProperties.minOf { it.averageProcessingTime }
                 .toMillis()
