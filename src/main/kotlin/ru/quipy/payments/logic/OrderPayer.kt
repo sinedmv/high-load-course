@@ -41,10 +41,12 @@ class OrderPayer {
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(paymentService.getAllAccountsProperties().maxOf { it.parallelRequests }),
+        LinkedBlockingQueue(300), // SLA > T_waiting + T_proc = ActiveQueueSize / RPS + AvgProcessingTime => N < 11 * 29 = 319
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
+    // T_proc = AvgProcessingTime
+    // T_waiting = ActiveQueueSize / RPS
 
     init {
         setupMetrics()
@@ -79,10 +81,9 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (paymentExecutor.queue.remainingCapacity() == 0) {
             val accountProperties = paymentService.getAllAccountsProperties()
-            val retryAfter = accountProperties.minOf { it.averageProcessingTime }
-                .toMillis()
-                .div(1000.0)
-            throw TooManyRequestsWithRetryAfterException(retryAfter.roundToInt())
+            val minRetryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
+            val retryAfter = randomizeRetryAfter(minRetryAfter)
+            throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
 
         val createdAt = System.currentTimeMillis()
@@ -102,5 +103,10 @@ class OrderPayer {
             paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
         }
         return createdAt
+    }
+
+    private fun randomizeRetryAfter(minValue: Long, jitterFactor: Double = 2.0): Long {
+        val jitter = (minValue * jitterFactor * Math.random()).toLong()
+        return minValue + jitter
     }
 }
