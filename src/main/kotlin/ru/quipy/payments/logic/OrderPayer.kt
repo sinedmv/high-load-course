@@ -37,6 +37,7 @@ class OrderPayer {
     private lateinit var paymentService: PaymentService
 
     private lateinit var rateLimiter: RateLimiter
+    private var retryAfter: Long = 0
 
     private val paymentExecutor = ThreadPoolExecutor(
         16,
@@ -51,6 +52,7 @@ class OrderPayer {
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
+        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
         val slaSeconds = 26L
         val processingTimeSeconds = 1L
@@ -97,7 +99,7 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (!rateLimiter.tick()) {
             logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-            throw TooManyRequestsWithRetryAfterException(calculateDynamicRetryAfter())
+            throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
 
         val createdAt = System.currentTimeMillis()
@@ -117,17 +119,5 @@ class OrderPayer {
             paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
         }
         return createdAt
-    }
-
-    private fun calculateDynamicRetryAfter(): Long {
-        val queueSize = (rateLimiter as TokenBucketRateLimiter).getCurrentQueueSize()
-        val estimatedWaitMs = (queueSize / 11.0 * 1000).toLong()
-        val timeUntilSlaBreach = 26000 - estimatedWaitMs - 1000
-
-        return when {
-            timeUntilSlaBreach > 10000 -> 1000L
-            timeUntilSlaBreach > 0 -> timeUntilSlaBreach
-            else -> 30000L
-        }
     }
 }
