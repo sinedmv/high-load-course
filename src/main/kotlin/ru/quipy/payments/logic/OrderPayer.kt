@@ -41,7 +41,7 @@ class OrderPayer {
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(300), // SLA > T_waiting + T_proc = ActiveQueueSize / RPS + AvgProcessingTime => N < 11 * 29 = 319
+        LinkedBlockingQueue(64), // SLA > T_waiting + T_proc = ActiveQueueSize / RPS + AvgProcessingTime => N < 11 * 29 = 319
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
@@ -81,8 +81,8 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (paymentExecutor.queue.remainingCapacity() == 0) {
             val accountProperties = paymentService.getAllAccountsProperties()
-            val minRetryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
-            val retryAfter = randomizeRetryAfter(minRetryAfter)
+            val retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
+            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
             throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
 
