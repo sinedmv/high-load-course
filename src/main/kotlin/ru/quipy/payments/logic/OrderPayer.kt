@@ -53,8 +53,10 @@ class OrderPayer {
         val accountProperties = paymentService.getAllAccountsProperties()
 
         val rateLimitPerSec = accountProperties.minOf { it.rateLimitPerSec }
-        rateLimiter = FixedWindowRateLimiter(rateLimitPerSec - 2, 1, TimeUnit.SECONDS)
+        rateLimiter = CompositeRateLimiter(TokenBucketRateLimiter(rateLimitPerSec, 130, 1, TimeUnit.SECONDS),
+            FixedWindowRateLimiter(rateLimitPerSec, 1, TimeUnit.SECONDS))
 
+        // SLA > N / RPS + CurrentProcessing = N / 11 + AvgProcessing => N < 132 (buckerCapacity)
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 2
 
         setupMetrics()
