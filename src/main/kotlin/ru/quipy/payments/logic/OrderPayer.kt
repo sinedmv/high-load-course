@@ -2,14 +2,13 @@ package ru.quipy.payments.logic
 
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.Metrics
+import jakarta.annotation.PostConstruct
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.PaymentMetrics
-import ru.quipy.common.utils.CallerBlockingRejectedExecutionHandler
-import ru.quipy.common.utils.NamedThreadFactory
-import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.*
 import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
@@ -36,19 +35,28 @@ class OrderPayer {
     @Autowired
     private lateinit var paymentService: PaymentService
 
+    private lateinit var rateLimiter: RateLimiter
+    private var retryAfter: Long = 0
+
     private val paymentExecutor = ThreadPoolExecutor(
         16,
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(64), // SLA > T_waiting + T_proc = ActiveQueueSize / RPS + AvgProcessingTime => N < 11 * 29 = 319
+        LinkedBlockingQueue(30000),
         NamedThreadFactory("payment-submission-executor"),
         CallerBlockingRejectedExecutionHandler()
     )
-    // T_proc = AvgProcessingTime
-    // T_waiting = ActiveQueueSize / RPS
 
-    init {
+    @PostConstruct
+    fun init() {
+        val accountProperties = paymentService.getAllAccountsProperties()
+
+        val rateLimitPerSec = accountProperties.minOf { it.rateLimitPerSec }
+        rateLimiter = FixedWindowRateLimiter(rateLimitPerSec - 2, 1, TimeUnit.SECONDS)
+
+        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 2
+
         setupMetrics()
     }
 
@@ -79,9 +87,7 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-        if (paymentExecutor.queue.remainingCapacity() == 0) {
-            val accountProperties = paymentService.getAllAccountsProperties()
-            val retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
+        if (!rateLimiter.tick()) {
             logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
             throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
