@@ -56,7 +56,7 @@ class OrderPayer {
         rateLimiter = TokenBucketRateLimiter(rateLimitPerSec, 100, 1, TimeUnit.SECONDS)
         // SLA > N / RPS + CurrentProcessing = N / 11 + AvgProcessing => N < 132 (bucketCapacity)
 
-        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 3
+        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() + 3000
 
         setupMetrics()
     }
