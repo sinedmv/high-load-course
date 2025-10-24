@@ -14,7 +14,9 @@ import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.util.*
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
@@ -41,9 +43,9 @@ class OrderPayer {
         16,
         0L,
         TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(64), // SLA > T_waiting + T_proc = ActiveQueueSize / RPS + AvgProcessingTime => N < 11 * 29 = 319
+        ArrayBlockingQueue(280), // SLA > T_waiting + T_proc = ActiveQueueSize / RPS + AvgProcessingTime => (в идеальной ситуации) N < 11 * 29 = 319
         NamedThreadFactory("payment-submission-executor"),
-        CallerBlockingRejectedExecutionHandler()
+        ThreadPoolExecutor.AbortPolicy() // кидает exception, если очередь заполнена
     )
     // T_proc = AvgProcessingTime
     // T_waiting = ActiveQueueSize / RPS
@@ -79,29 +81,27 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-        if (paymentExecutor.queue.remainingCapacity() == 0) {
-            val accountProperties = paymentService.getAllAccountsProperties()
-            val retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
-            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-            throw TooManyRequestsWithRetryAfterException(retryAfter)
-        }
-
         val createdAt = System.currentTimeMillis()
 
-        paymentExecutor.submit {
-            val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
-            }
-            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
+        try {
+            paymentExecutor.submit {
+                val createdEvent = paymentESService.create {
+                    it.create(
+                        paymentId,
+                        orderId,
+                        amount
+                    )
+                }
+                logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
-            paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
-            val duration = System.currentTimeMillis() - createdAt;
-            paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
+                paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
+                val duration = System.currentTimeMillis() - createdAt;
+                paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
+            }
+        } catch (e: RejectedExecutionException) {
+            throw TooManyRequestsWithRetryAfterException(1000)
         }
+
         return createdAt
     }
 
