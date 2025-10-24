@@ -12,6 +12,7 @@ import ru.quipy.common.utils.*
 import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.time.Duration
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
@@ -36,7 +37,6 @@ class OrderPayer {
     private lateinit var paymentService: PaymentService
 
     private lateinit var rateLimiter: RateLimiter
-    private var retryAfter: Long = 0
 
     private val paymentExecutor = ThreadPoolExecutor(
         16,
@@ -51,11 +51,19 @@ class OrderPayer {
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
+        val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
+        val slaSeconds = 26L
+        val processingTimeSeconds = 1L
 
-        val rateLimitPerSec = accountProperties.minOf { it.rateLimitPerSec }
-        rateLimiter = FixedWindowRateLimiter(rateLimitPerSec - 2, 1, TimeUnit.SECONDS)
+        val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.7
+        val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
 
-        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 2
+        rateLimiter = TokenBucketRateLimiter(
+            rate = externalServiceRps,
+            window = 1,
+            bucketMaxCapacity = bucketSize,
+            timeUnit = TimeUnit.SECONDS
+        )
 
         setupMetrics()
     }
@@ -89,7 +97,7 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (!rateLimiter.tick()) {
             logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-            throw TooManyRequestsWithRetryAfterException(retryAfter)
+            throw TooManyRequestsWithRetryAfterException(calculateDynamicRetryAfter())
         }
 
         val createdAt = System.currentTimeMillis()
@@ -111,8 +119,15 @@ class OrderPayer {
         return createdAt
     }
 
-    private fun randomizeRetryAfter(minValue: Long, jitterFactor: Double = 2.0): Long {
-        val jitter = (minValue * jitterFactor * Math.random()).toLong()
-        return minValue + jitter
+    private fun calculateDynamicRetryAfter(): Long {
+        val queueSize = (rateLimiter as TokenBucketRateLimiter).getCurrentQueueSize()
+        val estimatedWaitMs = (queueSize / 11.0 * 1000).toLong()
+        val timeUntilSlaBreach = 26000 - estimatedWaitMs - 1000
+
+        return when {
+            timeUntilSlaBreach > 10000 -> 1000L
+            timeUntilSlaBreach > 0 -> timeUntilSlaBreach
+            else -> 30000L
+        }
     }
 }

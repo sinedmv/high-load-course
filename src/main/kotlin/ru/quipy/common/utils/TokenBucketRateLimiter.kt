@@ -50,4 +50,6 @@ class TokenBucketRateLimiter(
             }
         }
     }
+
+    fun getCurrentQueueSize(): Int = bucketMaxCapacity - bucket.get()
 }
