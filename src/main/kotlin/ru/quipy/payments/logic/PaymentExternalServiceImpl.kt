@@ -2,6 +2,8 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.Metrics
+import io.micrometer.core.instrument.Timer
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
@@ -38,12 +40,23 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = properties.averageProcessingTime
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+    private val timeoutMultiplier = 1.2
 
     private val maxRetries = 4
 
-    private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS)
+        .readTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS)
+        .writeTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS)
+        .callTimeout((requestAverageProcessingTime.toMillis() * timeoutMultiplier).toLong(), TimeUnit.MILLISECONDS)
+        .build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
     private val ongoingWindow = OngoingWindow(parallelRequests)
+
+    private val requestLatency = Timer.builder("request_latency")
+        .description("Request latency in seconds")
+        .publishPercentiles(0.5, 0.8, 0.99)
+        .register(Metrics.globalRegistry)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val startTime = System.currentTimeMillis();
@@ -68,7 +81,12 @@ class PaymentExternalSystemAdapterImpl(
                     post(emptyBody)
                 }.build()
 
+                val requestStartTime = System.currentTimeMillis()
                 client.newCall(request).execute().use { response ->
+                    val durationMillis = response.receivedResponseAtMillis - requestStartTime
+                    requestLatency
+                        .record(durationMillis, TimeUnit.MILLISECONDS)
+
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                     } catch (e: Exception) {
