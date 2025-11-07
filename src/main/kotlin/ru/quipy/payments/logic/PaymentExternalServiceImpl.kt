@@ -2,6 +2,7 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.Timer
 import okhttp3.OkHttpClient
@@ -57,6 +58,22 @@ class PaymentExternalSystemAdapterImpl(
         .description("Request latency in seconds")
         .publishPercentiles(0.5, 0.8, 0.99)
         .register(Metrics.globalRegistry)
+
+    fun recordPaymentAttempt(attempts: Int) {
+        val label = when (attempts) {
+            0 -> "1"
+            1 -> "2"
+            2 -> "3"
+            3 -> "4"
+            else -> "4+"
+        }
+
+        Counter.builder("payment_attempts_by_count")
+            .description("Количество платежей по числу попыток")
+            .tag("attempts", label)
+            .register(Metrics.globalRegistry)
+            .increment()
+    }
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val startTime = System.currentTimeMillis();
@@ -130,6 +147,7 @@ class PaymentExternalSystemAdapterImpl(
             }
 
             if (isSuccess) {
+                recordPaymentAttempt(attempt);
                 return
             } else {
                 Thread.sleep(100 * (attempt.toLong() + 1)) // 0.1s 0.2s ...
