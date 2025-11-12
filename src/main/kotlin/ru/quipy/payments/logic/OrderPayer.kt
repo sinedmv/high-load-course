@@ -39,23 +39,15 @@ class OrderPayer {
     private lateinit var rateLimiter: RateLimiter
     private var retryAfter: Long = 0
 
-    private val paymentExecutor = ThreadPoolExecutor(
-        16,
-        16,
-        0L,
-        TimeUnit.MILLISECONDS,
-        LinkedBlockingQueue(30000),
-        NamedThreadFactory("payment-submission-executor"),
-        CallerBlockingRejectedExecutionHandler()
-    )
+    private lateinit var paymentExecutor: ThreadPoolExecutor;
 
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
-        val slaSeconds = 6.0
-        val processingTimeSeconds = 1.2
+        val slaSeconds = 20.0
+        val processingTimeSeconds = 0.5
 
         val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
         val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
@@ -65,6 +57,16 @@ class OrderPayer {
             window = 1,
             bucketMaxCapacity = bucketSize,
             timeUnit = TimeUnit.SECONDS
+        )
+
+        paymentExecutor = ThreadPoolExecutor(
+            accountProperties.minOf { it.parallelRequests },
+            accountProperties.minOf { it.parallelRequests },
+            0L,
+            TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue(30000),
+            NamedThreadFactory("payment-submission-executor"),
+            CallerBlockingRejectedExecutionHandler()
         )
 
         setupMetrics()
