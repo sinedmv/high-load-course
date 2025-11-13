@@ -1,4 +1,4 @@
-﻿package ru.quipy
+﻿package ru.quipy.tools
 
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
