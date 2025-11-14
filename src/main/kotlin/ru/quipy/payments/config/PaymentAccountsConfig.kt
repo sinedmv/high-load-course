@@ -7,7 +7,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import ru.quipy.PaymentMetrics
+import ru.quipy.tools.PaymentMetrics
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.*
