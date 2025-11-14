@@ -59,9 +59,14 @@ class OrderPayer {
             timeUnit = TimeUnit.SECONDS
         )
 
+        val testCount = 5000;
+        val rps = 100
+        val deadline = testCount / rps + slaSeconds;
+        val threadPoolSize = (processingTimeSeconds * testCount / deadline * 1.2).toInt();
+
         paymentExecutor = ThreadPoolExecutor(
-            accountProperties.minOf { it.parallelRequests },
-            accountProperties.minOf { it.parallelRequests },
+            threadPoolSize,
+            threadPoolSize,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
