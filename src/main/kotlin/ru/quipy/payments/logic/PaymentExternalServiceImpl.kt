@@ -5,19 +5,22 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.Timer
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
+import kotlinx.coroutines.*
+import okhttp3.*
 import org.slf4j.LoggerFactory
 import ru.quipy.PaymentMetrics
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import java.io.IOException
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 
 
 // Advice: always treat time as a Duration
@@ -72,7 +75,7 @@ class PaymentExternalSystemAdapterImpl(
             .increment()
     }
 
-    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+    override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         val startTime = System.currentTimeMillis();
         logger.warn("[$accountName] Submitting payment request for payment $paymentId, avgProcessingTime: $requestAverageProcessingTime")
 
@@ -88,15 +91,16 @@ class PaymentExternalSystemAdapterImpl(
         repeat(maxRetries) { attempt ->
             var isSuccess = false
             try {
-                ongoingWindow.acquire();
-                rateLimiter.tickBlocking();
+                ongoingWindow.acquireAsync();
+                rateLimiter.tickBlockingAsync();
                 val request = Request.Builder().run {
                     url("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
                     post(emptyBody)
                 }.build()
 
                 val requestStartTime = System.currentTimeMillis()
-                client.newCall(request).execute().use { response ->
+
+                client.newCall(request).await().use { response ->
                     val durationMillis = response.receivedResponseAtMillis - requestStartTime
                     requestLatency
                         .record(durationMillis, TimeUnit.MILLISECONDS)
@@ -147,7 +151,7 @@ class PaymentExternalSystemAdapterImpl(
                 recordPaymentAttempt(attempt);
                 return
             } else {
-                Thread.sleep(100 * (attempt.toLong() + 1)) // 0.1s 0.2s ...
+                delay(100 * (attempt.toLong() + 1)) // 0.1s 0.2s ... (асинхронная задержка)
             }
         }
     }
@@ -159,6 +163,17 @@ class PaymentExternalSystemAdapterImpl(
 
     override fun name() = properties.accountName
 
+    private suspend fun Call.await(): Response = suspendCoroutine { continuation ->
+        enqueue(object : Callback {
+            override fun onResponse(call: Call, response: Response) {
+                continuation.resume(response)
+            }
+
+            override fun onFailure(call: Call, e: IOException) {
+                continuation.resumeWithException(e)
+            }
+        })
+    }
 }
 
 public fun now() = System.currentTimeMillis()

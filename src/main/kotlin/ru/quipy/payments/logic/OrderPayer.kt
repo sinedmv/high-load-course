@@ -3,6 +3,9 @@ package ru.quipy.payments.logic
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.Metrics
 import jakarta.annotation.PostConstruct
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -40,6 +43,7 @@ class OrderPayer {
     private var retryAfter: Long = 0
 
     private lateinit var paymentExecutor: ThreadPoolExecutor;
+    val executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher())
 
     @PostConstruct
     fun init() {
@@ -106,7 +110,7 @@ class OrderPayer {
 
         val createdAt = System.currentTimeMillis()
 
-        paymentExecutor.submit {
+        executorScope.launch {
             val createdEvent = paymentESService.create {
                 it.create(
                     paymentId,
