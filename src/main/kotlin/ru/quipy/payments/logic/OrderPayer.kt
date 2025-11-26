@@ -43,7 +43,7 @@ class OrderPayer {
     private var retryAfter: Long = 0
 
     private lateinit var paymentExecutor: ThreadPoolExecutor;
-    val executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher())
+    private lateinit var executorScope: CoroutineScope;
 
     @PostConstruct
     fun init() {
@@ -72,6 +72,8 @@ class OrderPayer {
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler()
         )
+
+        executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher());
 
         setupMetrics()
     }
