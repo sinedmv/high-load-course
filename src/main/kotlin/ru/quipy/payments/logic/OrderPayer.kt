@@ -68,7 +68,7 @@ class OrderPayer {
             accountProperties.minOf { it.parallelRequests },
             0L,
             TimeUnit.MILLISECONDS,
-            LinkedBlockingQueue(30000),
+            LinkedBlockingQueue(15000),
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler()
         )
@@ -105,10 +105,10 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-//        if (!rateLimiter.tick()) {
-//            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-//            throw TooManyRequestsWithRetryAfterException(retryAfter)
-//        }
+        if (!rateLimiter.tick()) {
+            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
+            throw TooManyRequestsWithRetryAfterException(5)
+        }
 
         val createdAt = System.currentTimeMillis()
 
