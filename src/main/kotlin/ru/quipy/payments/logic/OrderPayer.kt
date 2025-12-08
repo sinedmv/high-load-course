@@ -64,7 +64,7 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            accountProperties.minOf { it.parallelRequests },
+            accountProperties.minOf { it.parallelRequests }, // TODO : проверить уменьшение кол-ва потоков
             accountProperties.minOf { it.parallelRequests },
             0L,
             TimeUnit.MILLISECONDS,
