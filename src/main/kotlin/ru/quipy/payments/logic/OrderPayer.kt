@@ -64,11 +64,11 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            accountProperties.minOf { it.parallelRequests }, // TODO : проверить уменьшение кол-ва потоков
-            accountProperties.minOf { it.parallelRequests },
+            500,
+            500,
             0L,
             TimeUnit.MILLISECONDS,
-            LinkedBlockingQueue(15000),
+            LinkedBlockingQueue(30000),
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler()
         )
