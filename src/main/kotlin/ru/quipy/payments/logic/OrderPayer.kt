@@ -3,6 +3,9 @@ package ru.quipy.payments.logic
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.Metrics
 import jakarta.annotation.PostConstruct
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -40,14 +43,15 @@ class OrderPayer {
     private var retryAfter: Long = 0
 
     private lateinit var paymentExecutor: ThreadPoolExecutor;
+    private lateinit var executorScope: CoroutineScope;
 
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
-        val slaSeconds = 20.0
-        val processingTimeSeconds = 0.5
+        val slaSeconds = 50.0
+        val processingTimeSeconds = 10.0
 
         val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
         val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
@@ -59,20 +63,17 @@ class OrderPayer {
             timeUnit = TimeUnit.SECONDS
         )
 
-        val testCount = 5000;
-        val rps = 100
-        val deadline = testCount / rps + slaSeconds;
-        val threadPoolSize = (processingTimeSeconds * testCount / deadline * 1.2).toInt();
-
         paymentExecutor = ThreadPoolExecutor(
-            threadPoolSize,
-            threadPoolSize,
+            500,
+            500,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler()
         )
+
+        executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher());
 
         setupMetrics()
     }
@@ -111,7 +112,7 @@ class OrderPayer {
 
         val createdAt = System.currentTimeMillis()
 
-        paymentExecutor.submit {
+        executorScope.launch {
             val createdEvent = paymentESService.create {
                 it.create(
                     paymentId,

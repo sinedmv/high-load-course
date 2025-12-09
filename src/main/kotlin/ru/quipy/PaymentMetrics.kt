@@ -21,6 +21,6 @@ class PaymentMetrics {
     val paymentTotalDurationTimer = Timer.builder("payment_total_duration_seconds")
         .description("Payment processing duration in seconds")
         .tag("type", "payment")
-        .publishPercentiles(0.95, 0.99)
+        .publishPercentiles(0.80, 0.95, 0.99)
         .register(Metrics.globalRegistry)
 }
