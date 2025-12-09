@@ -107,7 +107,7 @@ class OrderPayer {
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
         if (!rateLimiter.tick()) {
             logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-            throw TooManyRequestsWithRetryAfterException(5)
+            throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
 
         val createdAt = System.currentTimeMillis()
