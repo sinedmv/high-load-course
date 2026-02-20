@@ -49,10 +49,9 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val maxRetries = 4
+    private val maxRetries = 10
 
     private val client = HttpClient.newBuilder()
-        .executor(Executors.newFixedThreadPool(100))
         .version(HttpClient.Version.HTTP_2)
         .build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
@@ -86,7 +85,7 @@ class PaymentExternalSystemAdapterImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
-        val paymentTimeout = 50000L
+        val paymentTimeout = 20L
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         repeat(maxRetries) { attempt ->
@@ -101,7 +100,7 @@ class PaymentExternalSystemAdapterImpl(
                 val request = HttpRequest.newBuilder()
                     .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
                     .POST(HttpRequest.BodyPublishers.noBody())
-                    .timeout(Duration.ofSeconds(paymentTimeout))
+                    .timeout(Duration.ofMillis(paymentTimeout))
                     .build()
 
                 val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
