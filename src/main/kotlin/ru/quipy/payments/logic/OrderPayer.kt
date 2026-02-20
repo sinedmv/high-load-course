@@ -49,7 +49,7 @@ class OrderPayer {
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
-        val externalServiceRps = 2000
+        val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
         val slaSeconds = 1.0
         val processingTimeSeconds = 0.01
 
@@ -105,10 +105,10 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-        if (!rateLimiter.tick()) {
-            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-            throw TooManyRequestsWithRetryAfterException(20)
-        }
+//        if (!rateLimiter.tick()) {
+//            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
+//            throw TooManyRequestsWithRetryAfterException(20)
+//        }
 
         val createdAt = System.currentTimeMillis()
 
