@@ -2,8 +2,6 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import io.github.resilience4j.ratelimiter.RateLimiter
-import io.github.resilience4j.ratelimiter.RateLimiterConfig
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.Timer
@@ -56,10 +54,7 @@ class PaymentExternalSystemAdapterImpl(
     private val client = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_2)
         .build()
-    private val rateLimiter = RateLimiter.of("rate-limiter", RateLimiterConfig.custom()
-        .limitForPeriod(rateLimitPerSec)
-        .limitRefreshPeriod(Duration.ofMillis(1000))
-        .build())
+    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
     fun recordPaymentAttempt(attempts: Int) {
