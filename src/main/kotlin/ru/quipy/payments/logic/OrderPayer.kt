@@ -4,8 +4,10 @@ import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.Metrics
 import jakarta.annotation.PostConstruct
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
@@ -42,8 +44,8 @@ class OrderPayer {
     private lateinit var rateLimiter: RateLimiter
     private var retryAfter: Long = 0
 
-    private lateinit var paymentExecutor: ThreadPoolExecutor;
-    private lateinit var executorScope: CoroutineScope;
+    private lateinit var paymentExecutor: ThreadPoolExecutor
+    private lateinit var executorScope: CoroutineScope
 
     @PostConstruct
     fun init() {
@@ -73,7 +75,7 @@ class OrderPayer {
             CallerBlockingRejectedExecutionHandler()
         )
 
-        executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher());
+        executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher())
 
         setupMetrics()
     }
@@ -113,18 +115,17 @@ class OrderPayer {
         val createdAt = System.currentTimeMillis()
 
         executorScope.launch {
-            val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
+            val createdEvent = withContext(Dispatchers.IO) {
+                paymentESService.create {
+                    it.create(paymentId, orderId, amount)
+                }
             }
+
             logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
 
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
-            val duration = System.currentTimeMillis() - createdAt;
-            paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
+            val duration = System.currentTimeMillis() - createdAt
+            paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS)
         }
         return createdAt
     }
