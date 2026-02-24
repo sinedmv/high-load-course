@@ -64,8 +64,8 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            100,
-            100,
+            40,
+            40,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
@@ -105,10 +105,10 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
-//        if (!rateLimiter.tick()) {
-//            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
-//            throw TooManyRequestsWithRetryAfterException(20)
-//        }
+        if (!rateLimiter.tick()) {
+            logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
+            throw TooManyRequestsWithRetryAfterException(20)
+        }
 
         val createdAt = System.currentTimeMillis()
 
