@@ -48,18 +48,18 @@ class OrderPayer {
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
-        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
+        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 3
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
         val slaSeconds = 1.0
         val processingTimeSeconds = 0.01
 
-        val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
-        // val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
+        val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.7
+        val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
 
         rateLimiter = TokenBucketRateLimiter(
             rate = externalServiceRps,
             window = 1,
-            bucketMaxCapacity = externalServiceRps,
+            bucketMaxCapacity = bucketSize,
             timeUnit = TimeUnit.SECONDS
         )
 
