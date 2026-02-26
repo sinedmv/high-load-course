@@ -2,6 +2,8 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.github.resilience4j.ratelimiter.RateLimiter
+import io.github.resilience4j.ratelimiter.RateLimiterConfig
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
 import io.micrometer.core.instrument.Timer
@@ -54,7 +56,19 @@ class PaymentExternalSystemAdapterImpl(
     private val client = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_2)
         .build()
-    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
+    private val rateLimiter: RateLimiter = run {
+        val config = RateLimiterConfig.custom()
+            .limitForPeriod(rateLimitPerSec)
+            .limitRefreshPeriod(Duration.ofSeconds(1))
+            .timeoutDuration(Duration.ofSeconds(3600))
+            .build()
+        RateLimiter.of("payment-rate-limiter", config)
+    }
+
+    private suspend fun acquireRateLimitPermission() {
+        val waitTimeNanos = rateLimiter.reservePermission()
+        delay(waitTimeNanos / 1_000_000)
+    }
     private val ongoingWindow = OngoingWindow(parallelRequests)
 
     fun recordPaymentAttempt(attempts: Int) {
@@ -98,7 +112,7 @@ class PaymentExternalSystemAdapterImpl(
 
             try {
                 ongoingWindow.acquireAsync();
-                rateLimiter.tickBlockingAsync();
+                acquireRateLimitPermission()
                 val request = HttpRequest.newBuilder()
                     .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
                     .POST(HttpRequest.BodyPublishers.noBody())
