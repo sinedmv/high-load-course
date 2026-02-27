@@ -50,8 +50,8 @@ class OrderPayer {
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
-        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 3
-        val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
+        retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis() * 5
+        val externalServiceRps = 800
         val slaSeconds = 1.0
         val processingTimeSeconds = 0.01
 
@@ -66,8 +66,8 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            50,
-            50,
+            150,
+            150,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
