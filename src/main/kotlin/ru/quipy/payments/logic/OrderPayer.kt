@@ -107,10 +107,12 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+        paymentMetrics.processPaymentStartedCounter.increment()
         if (!rateLimiter.tick()) {
             logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
             throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
+        paymentMetrics.processPaymentRateLimiterPassedCounter.increment()
 
         val createdAt = System.currentTimeMillis()
 
