@@ -74,6 +74,7 @@ class OrderPayer {
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler()
         )
+        paymentExecutor.prestartAllCoreThreads()
 
         executorScope = CoroutineScope(paymentExecutor.asCoroutineDispatcher())
 
