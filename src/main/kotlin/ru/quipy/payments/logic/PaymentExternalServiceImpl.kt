@@ -49,7 +49,7 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val maxRetries = 4
+    private val maxRetries = 10
 
     private val client = HttpClient.newBuilder()
         .executor(Executors.newFixedThreadPool(100))
@@ -75,6 +75,7 @@ class PaymentExternalSystemAdapterImpl(
     }
 
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+        paymentMetrics.performPaymentStartedCounter.increment()
         val startTime = System.currentTimeMillis();
         logger.warn("[$accountName] Submitting payment request for payment $paymentId, avgProcessingTime: $requestAverageProcessingTime")
 
@@ -85,8 +86,9 @@ class PaymentExternalSystemAdapterImpl(
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
+        paymentMetrics.submissionLogged.increment()
 
-        val paymentTimeout = 50000L
+        val paymentTimeout = 1000L
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         repeat(maxRetries) { attempt ->
@@ -96,15 +98,18 @@ class PaymentExternalSystemAdapterImpl(
             }
 
             try {
-                ongoingWindow.acquireAsync();
+                ongoingWindow.acquireAsync()
+                paymentMetrics.windowAcquired.increment()
                 rateLimiter.tickBlockingAsync();
+                paymentMetrics.rateLimiterAcquired.increment()
                 val request = HttpRequest.newBuilder()
                     .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
                     .POST(HttpRequest.BodyPublishers.noBody())
-                    .timeout(Duration.ofSeconds(paymentTimeout))
+                    .timeout(Duration.ofMillis(paymentTimeout))
                     .build()
 
                 val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
+                paymentMetrics.responseReceived.increment()
 
                 val body = try {
                     mapper.readValue(response.body(), ExternalSysResponse::class.java)
@@ -112,6 +117,7 @@ class PaymentExternalSystemAdapterImpl(
                     logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.statusCode()}, reason: ${response.body()}")
                     ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                 }
+                paymentMetrics.bodyRead.increment()
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.statusCode()}, attempt: $attempt")
 
@@ -120,6 +126,7 @@ class PaymentExternalSystemAdapterImpl(
                 paymentESService.update(paymentId) {
                     it.logProcessing(body.result, now(), transactionId, reason = body.message)
                 }
+                paymentMetrics.processingLogged.increment()
 
                 if (body.result) {
                     recordPaymentAttempt(attempt)
@@ -130,6 +137,7 @@ class PaymentExternalSystemAdapterImpl(
                 paymentESService.update(paymentId) {
                     it.logProcessing(false, now(), transactionId, reason = e.message)
                 }
+                paymentMetrics.processingLogged.increment()
             } finally {
                 ongoingWindow.release()
             }
