@@ -50,11 +50,13 @@ class OrderPayer {
         val accountProperties = paymentService.getAllAccountsProperties()
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
-        val slaSeconds = 50.0
-        val processingTimeSeconds = 10.0
+        val slaSeconds = 1.0
+        val processingTimeSeconds = 0.01
 
         val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
-        val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
+        val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt() // тут получается 3960
+
+        // val bucketSize = 5000 // я бы сделала пока что так, потому что нам нужно всю нагрузку выдерживать, а не отбрасывать запросы
 
         rateLimiter = TokenBucketRateLimiter(
             rate = externalServiceRps,
