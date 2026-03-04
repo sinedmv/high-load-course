@@ -105,10 +105,6 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         repeat(maxRetries) { attempt ->
-             if (System.currentTimeMillis() - startTime >= paymentTimeout) {
-                logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
-                return
-             }
 
             try {
                 ongoingWindow.acquireAsync()
