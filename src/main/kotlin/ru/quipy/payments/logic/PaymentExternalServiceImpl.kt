@@ -5,6 +5,7 @@ import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.future.await
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -16,11 +17,13 @@ import ru.quipy.Scope
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
+import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.logger
 import java.net.URI
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 
 // Advice: always treat time as a Duration
@@ -77,7 +80,7 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
 
-        scope.esServiceCoroutineScope.launch {
+        scope.esWriter.submit(paymentId) {
             // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
             // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
             paymentESService.update(paymentId) {
@@ -119,7 +122,7 @@ class PaymentExternalSystemAdapterImpl(
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.statusCode()}, attempt: $attempt")
 
-                scope.esServiceCoroutineScope.launch {
+                scope.esWriter.submit(paymentId) {
                     // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
                     // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
                     paymentESService.update(paymentId) {
@@ -134,7 +137,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
             } catch (e: Exception) {
                 logger.error("[$accountName] Payment failed for $paymentId", e)
-                scope.esServiceCoroutineScope.launch {
+                scope.esWriter.submit(paymentId) {
                     paymentESService.update(paymentId) {
                         it.logProcessing(false, now(), transactionId, reason = e.message)
                     }
@@ -159,3 +162,40 @@ class PaymentExternalSystemAdapterImpl(
 }
 
 public fun now() = System.currentTimeMillis()
+
+data class EsWrite(
+    val key: UUID,              // paymentId
+    val action: suspend () -> Unit
+)
+
+class OrderedEsWriter(
+    scope: CoroutineScope,
+    shards: Int = 128,
+    queueSizePerShard: Int = 20000
+) {
+    private val channels = Array(shards) { Channel<EsWrite>(queueSizePerShard) }
+
+    init {
+        repeat(shards) { i ->
+            scope.launch(Dispatchers.IO) {
+                for (job in channels[i]) {
+                    try {
+                        job.action()
+                    } catch (e: Exception) {
+                        logger.error("[ERROR] Database timeout: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun submit(key: UUID, action: suspend () -> Unit) {
+        val idx = shard(key)
+        channels[idx].send(EsWrite(key, action))
+    }
+
+    private fun shard(key: UUID): Int {
+        val h = key.mostSignificantBits xor key.leastSignificantBits
+        return (abs(h.toInt()) % channels.size)
+    }
+}

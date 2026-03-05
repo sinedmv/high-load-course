@@ -67,8 +67,8 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            500,
-            500,
+            150,
+            150,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
@@ -118,7 +118,7 @@ class OrderPayer {
         val createdAt = System.currentTimeMillis()
 
         executorScope.launch {
-            scope.esServiceCoroutineScope.launch {
+            scope.esWriter.submit(paymentId) {
                 val createdEvent = paymentESService.create {
                     it.create(
                         paymentId,
