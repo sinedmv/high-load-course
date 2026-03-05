@@ -170,7 +170,7 @@ data class EsWrite(
 
 class OrderedEsWriter(
     scope: CoroutineScope,
-    shards: Int = 128,
+    shards: Int = 64,
     queueSizePerShard: Int = 20000
 ) {
     private val channels = Array(shards) { Channel<EsWrite>(queueSizePerShard) }

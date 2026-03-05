@@ -67,8 +67,8 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            150,
-            150,
+            50,
+            50,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
