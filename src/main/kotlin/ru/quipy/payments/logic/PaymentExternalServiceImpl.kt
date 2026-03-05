@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
-import io.micrometer.core.instrument.Timer
 import kotlinx.coroutines.*
 import kotlinx.coroutines.future.await
 import java.net.http.HttpClient
@@ -13,19 +12,15 @@ import java.net.http.HttpResponse
 import org.slf4j.LoggerFactory
 import ru.quipy.PaymentMetrics
 import ru.quipy.common.utils.OngoingWindow
+import ru.quipy.Scope
 import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
-import java.io.IOException
-import java.net.SocketTimeoutException
 import java.net.URI
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
 
 
 // Advice: always treat time as a Duration
@@ -34,7 +29,8 @@ class PaymentExternalSystemAdapterImpl(
     private val paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>,
     private val paymentProviderHostPort: String,
     private val token: String,
-    private val paymentMetrics: PaymentMetrics
+    private val paymentMetrics: PaymentMetrics,
+    private val scope: Scope,
 ) : PaymentExternalSystemAdapter {
 
     companion object {
@@ -81,12 +77,14 @@ class PaymentExternalSystemAdapterImpl(
 
         val transactionId = UUID.randomUUID()
 
-        // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
-        // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
-        paymentESService.update(paymentId) {
-            it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+        scope.esServiceCoroutineScope.launch {
+            // Вне зависимости от исхода оплаты важно отметить что она была отправлена.
+            // Это требуется сделать ВО ВСЕХ СЛУЧАЯХ, поскольку эта информация используется сервисом тестирования.
+            paymentESService.update(paymentId) {
+                it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
+            }
+            paymentMetrics.submissionLogged.increment()
         }
-        paymentMetrics.submissionLogged.increment()
 
         val paymentTimeout = 1000L
 
@@ -121,12 +119,14 @@ class PaymentExternalSystemAdapterImpl(
 
                 logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.statusCode()}, attempt: $attempt")
 
-                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                scope.esServiceCoroutineScope.launch {
+                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                    }
+                    paymentMetrics.processingLogged.increment()
                 }
-                paymentMetrics.processingLogged.increment()
 
                 if (body.result) {
                     recordPaymentAttempt(attempt)
@@ -134,10 +134,12 @@ class PaymentExternalSystemAdapterImpl(
                 }
             } catch (e: Exception) {
                 logger.error("[$accountName] Payment failed for $paymentId", e)
-                paymentESService.update(paymentId) {
-                    it.logProcessing(false, now(), transactionId, reason = e.message)
+                scope.esServiceCoroutineScope.launch {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
+                    paymentMetrics.processingLogged.increment()
                 }
-                paymentMetrics.processingLogged.increment()
             } finally {
                 ongoingWindow.release()
             }

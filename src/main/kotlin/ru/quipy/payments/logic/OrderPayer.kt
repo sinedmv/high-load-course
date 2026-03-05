@@ -11,17 +11,15 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.PaymentMetrics
+import ru.quipy.Scope
 import ru.quipy.common.utils.*
 import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
-import java.time.Duration
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import kotlin.math.roundToInt
-import kotlin.math.roundToLong
 
 @Service
 class OrderPayer {
@@ -44,6 +42,9 @@ class OrderPayer {
 
     private lateinit var paymentExecutor: ThreadPoolExecutor;
     private lateinit var executorScope: CoroutineScope;
+
+    @Autowired
+    private lateinit var scope: Scope
 
     @PostConstruct
     fun init() {
@@ -117,15 +118,16 @@ class OrderPayer {
         val createdAt = System.currentTimeMillis()
 
         executorScope.launch {
-            val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
+            scope.esServiceCoroutineScope.launch {
+                val createdEvent = paymentESService.create {
+                    it.create(
+                        paymentId,
+                        orderId,
+                        amount
+                    )
+                }
+                logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
             }
-            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
-
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
             val duration = System.currentTimeMillis() - createdAt;
             paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
