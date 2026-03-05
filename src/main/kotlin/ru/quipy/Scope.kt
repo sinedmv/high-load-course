@@ -10,6 +10,6 @@ import ru.quipy.payments.logic.OrderedEsWriter
 @Component
 class Scope {
     @OptIn(ExperimentalCoroutinesApi::class)
-    val esServiceCoroutineScope = CoroutineScope(SupervisorJob())
+    val esServiceCoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val esWriter: OrderedEsWriter = OrderedEsWriter(esServiceCoroutineScope)
 }
