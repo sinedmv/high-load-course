@@ -2,11 +2,14 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.github.resilience4j.ratelimiter.RateLimiter
+import io.github.resilience4j.ratelimiter.RateLimiterConfig
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.Metrics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.future.await
+import okhttp3.internal.wait
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -48,14 +51,21 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val maxRetries = 10
+    private val maxRetries = 1
 
     private val client = HttpClient.newBuilder()
-        .executor(Executors.newFixedThreadPool(100))
         .version(HttpClient.Version.HTTP_2)
         .build()
-    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
+//    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
     private val ongoingWindow = OngoingWindow(parallelRequests)
+    private val rateLimiter: RateLimiter = RateLimiter.of(
+        "payments-$accountName",
+        RateLimiterConfig.custom()
+            .limitForPeriod(rateLimitPerSec)
+            .limitRefreshPeriod(Duration.ofSeconds(1))
+            .timeoutDuration(Duration.ofSeconds(1000))
+            .build()
+    )
 
     fun recordPaymentAttempt(attempts: Int) {
         val label = when (attempts) {
@@ -93,15 +103,15 @@ class PaymentExternalSystemAdapterImpl(
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         repeat(maxRetries) { attempt ->
-            if (System.currentTimeMillis() - startTime >= paymentTimeout) {
-                logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
-                return
-            }
-
             try {
                 ongoingWindow.acquireAsync()
                 paymentMetrics.windowAcquired.increment()
-                rateLimiter.tickBlockingAsync();
+                RateLimiter.waitForPermission(rateLimiter);
+                if (System.currentTimeMillis() - startTime >= paymentTimeout) {
+                    logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
+                    return
+                }
+
                 paymentMetrics.rateLimiterAcquired.increment()
                 val request = HttpRequest.newBuilder()
                     .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
@@ -145,12 +155,12 @@ class PaymentExternalSystemAdapterImpl(
                 }
             } finally {
                 ongoingWindow.release()
+                val duration = System.currentTimeMillis() - startTime;
+                paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
             }
 
-            delay(100L * (attempt + 1))
+            //delay(100L * (attempt + 1))
         }
-        val duration = System.currentTimeMillis() - startTime;
-        paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
     }
 
     override fun price() = properties.price
@@ -164,13 +174,13 @@ class PaymentExternalSystemAdapterImpl(
 public fun now() = System.currentTimeMillis()
 
 data class EsWrite(
-    val key: UUID,              // paymentId
+    val key: UUID,
     val action: suspend () -> Unit
 )
 
 class OrderedEsWriter(
     scope: CoroutineScope,
-    shards: Int = 128,
+    shards: Int = 400,
     queueSizePerShard: Int = 20000
 ) {
     private val channels = Array(shards) { Channel<EsWrite>(queueSizePerShard) }
@@ -182,7 +192,7 @@ class OrderedEsWriter(
                     try {
                         job.action()
                     } catch (e: Exception) {
-                        logger.error("[ERROR] Database timeout: ${e.message}")
+                        logger.error("[ERROR] Database sending error: ${e.message}")
                     }
                 }
             }
