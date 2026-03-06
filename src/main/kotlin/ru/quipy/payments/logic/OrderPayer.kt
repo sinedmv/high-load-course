@@ -55,9 +55,7 @@ class OrderPayer {
         val processingTimeSeconds = 0.01
 
         val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
-        val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt() // тут получается 3960
-
-        // val bucketSize = 5000 // я бы сделала пока что так, потому что нам нужно всю нагрузку выдерживать, а не отбрасывать запросы
+        val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
 
         rateLimiter = TokenBucketRateLimiter(
             rate = externalServiceRps,
