@@ -63,7 +63,7 @@ class PaymentExternalSystemAdapterImpl(
         RateLimiterConfig.custom()
             .limitForPeriod(rateLimitPerSec)
             .limitRefreshPeriod(Duration.ofSeconds(1))
-            .timeoutDuration(Duration.ofSeconds(1000))
+            .timeoutDuration(Duration.ofSeconds(1))
             .build()
     )
 
