@@ -11,17 +11,15 @@ import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 import ru.quipy.PaymentMetrics
+import ru.quipy.Scope
 import ru.quipy.common.utils.*
 import ru.quipy.common.utils.exceptions.TooManyRequestsWithRetryAfterException
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
-import java.time.Duration
 import java.util.*
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import kotlin.math.roundToInt
-import kotlin.math.roundToLong
 
 @Service
 class OrderPayer {
@@ -45,13 +43,16 @@ class OrderPayer {
     private lateinit var paymentExecutor: ThreadPoolExecutor;
     private lateinit var executorScope: CoroutineScope;
 
+    @Autowired
+    private lateinit var scope: Scope
+
     @PostConstruct
     fun init() {
         val accountProperties = paymentService.getAllAccountsProperties()
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
-        val slaSeconds = 50.0
-        val processingTimeSeconds = 10.0
+        val slaSeconds = 1.0
+        val processingTimeSeconds = 0.01
 
         val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
         val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
@@ -64,8 +65,8 @@ class OrderPayer {
         )
 
         paymentExecutor = ThreadPoolExecutor(
-            500,
-            500,
+            50,
+            50,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue(30000),
@@ -105,23 +106,26 @@ class OrderPayer {
     }
 
     fun processPayment(orderId: UUID, amount: Int, paymentId: UUID, deadline: Long): Long {
+        paymentMetrics.processPaymentStartedCounter.increment()
         if (!rateLimiter.tick()) {
             logger.warn("429 TooMany Req. OrderId: ${orderId}, PaymentId: ${paymentId}")
             throw TooManyRequestsWithRetryAfterException(retryAfter)
         }
+        paymentMetrics.processPaymentRateLimiterPassedCounter.increment()
 
         val createdAt = System.currentTimeMillis()
 
         executorScope.launch {
-            val createdEvent = paymentESService.create {
-                it.create(
-                    paymentId,
-                    orderId,
-                    amount
-                )
+            scope.esWriter.submit(paymentId) {
+                val createdEvent = paymentESService.create {
+                    it.create(
+                        paymentId,
+                        orderId,
+                        amount
+                    )
+                }
+                logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
             }
-            logger.trace("Payment ${createdEvent.paymentId} for order $orderId created.")
-
             paymentService.submitPaymentRequest(paymentId, amount, createdAt, deadline)
             val duration = System.currentTimeMillis() - createdAt;
             paymentMetrics.paymentTotalDurationTimer.record(duration, TimeUnit.MILLISECONDS);
