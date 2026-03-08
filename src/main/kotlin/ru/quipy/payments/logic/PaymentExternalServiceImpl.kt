@@ -99,7 +99,7 @@ class PaymentExternalSystemAdapterImpl(
             paymentMetrics.submissionLogged.increment()
         }
 
-        val paymentTimeout = 1000L
+        val paymentTimeout = 1500L
 
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         repeat(maxRetries) { attempt ->
