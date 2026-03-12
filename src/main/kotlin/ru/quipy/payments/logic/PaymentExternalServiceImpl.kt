@@ -9,6 +9,7 @@ import io.micrometer.core.instrument.Metrics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.future.await
+import kotlinx.coroutines.selects.select
 import okhttp3.internal.wait
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -49,7 +50,7 @@ class PaymentExternalSystemAdapterImpl(
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.averageProcessingTime
+    private val requestAverageProcessingTime = Duration.ofMillis(50)
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
     private val paymentTimeout = 1500L
@@ -144,7 +145,7 @@ class PaymentExternalSystemAdapterImpl(
         }
         RateLimiter.waitForPermission(rateLimiter)
 
-        var result = executeRequestWithHedge(paymentId, transactionId, uri)
+        val result = executeRequestWithHedge(paymentId, transactionId, uri)
 
         if (!result) {
             ongoingWindow.release()
@@ -169,7 +170,17 @@ class PaymentExternalSystemAdapterImpl(
             executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
         }
 
-        val hedgedDeferred = async {
+        val hedgedDeferred1 = async {
+            //delay(requestAverageProcessingTime.toMillis())
+            if (!primaryDeferred.isCompleted) {
+                hedgedRequests.increment()
+                executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+            } else {
+                false
+            }
+        }
+
+        val hedgedDeferred2 = async {
             delay(requestAverageProcessingTime.toMillis())
             if (!primaryDeferred.isCompleted) {
                 hedgedRequests.increment()
@@ -179,10 +190,23 @@ class PaymentExternalSystemAdapterImpl(
             }
         }
 
-        val primaryResult = primaryDeferred.await()
-        val hedgedResult = hedgedDeferred.await()
-
-        primaryResult || hedgedResult
+        select {
+            primaryDeferred.onAwait { result ->
+                hedgedDeferred1.cancel()
+                hedgedDeferred2.cancel()
+                result
+            }
+            hedgedDeferred1.onAwait { result ->
+                primaryDeferred.cancel()
+                hedgedDeferred2.cancel()
+                result
+            }
+            hedgedDeferred2.onAwait { result ->
+                primaryDeferred.cancel()
+                hedgedDeferred1.cancel()
+                result
+            }
+        }
     }
 
     private suspend  fun executeRequestAsync(
