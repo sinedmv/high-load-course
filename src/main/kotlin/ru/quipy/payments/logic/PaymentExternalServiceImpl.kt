@@ -71,7 +71,7 @@ class PaymentExternalSystemAdapterImpl(
     )
 
     private val hedgedRequests: Counter = Counter
-        .builder("hedged_request")
+        .builder("hedged_requests_count")
         .register(Metrics.globalRegistry)
 
 
@@ -144,8 +144,7 @@ class PaymentExternalSystemAdapterImpl(
         }
         RateLimiter.waitForPermission(rateLimiter)
 
-        val idempotencyKey = UUID.randomUUID().toString()
-        var result = executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+        var result = executeRequestWithHedge(paymentId, transactionId, uri)
 
         if (!result) {
             ongoingWindow.release()
@@ -157,6 +156,33 @@ class PaymentExternalSystemAdapterImpl(
         paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
 
         return true
+    }
+
+    private suspend fun executeRequestWithHedge(
+        paymentId: UUID,
+        transactionId: UUID,
+        uri: String
+    ): Boolean = supervisorScope {
+        val idempotencyKey = UUID.randomUUID().toString()
+
+        val primaryDeferred = async {
+            executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+        }
+
+        val hedgedDeferred = async {
+            delay(requestAverageProcessingTime.toMillis())
+            if (!primaryDeferred.isCompleted) {
+                hedgedRequests.increment()
+                executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+            } else {
+                false
+            }
+        }
+
+        val primaryResult = primaryDeferred.await()
+        val hedgedResult = hedgedDeferred.await()
+
+        primaryResult || hedgedResult
     }
 
     private suspend  fun executeRequestAsync(
