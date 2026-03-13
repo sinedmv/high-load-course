@@ -181,7 +181,7 @@ class PaymentExternalSystemAdapterImpl(
         }
 
         val hedgedDeferred2 = async {
-            delay(requestAverageProcessingTime.toMillis())
+            //delay(requestAverageProcessingTime.toMillis())
             if (!primaryDeferred.isCompleted) {
                 hedgedRequests.increment()
                 executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
