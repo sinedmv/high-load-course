@@ -9,6 +9,7 @@ import io.micrometer.core.instrument.Metrics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.future.await
+import kotlinx.coroutines.selects.select
 import okhttp3.internal.wait
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -26,7 +27,9 @@ import java.time.Duration
 import java.util.*
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.toString
 
 
 // Advice: always treat time as a Duration
@@ -47,9 +50,10 @@ class PaymentExternalSystemAdapterImpl(
 
     private val serviceName = properties.serviceName
     private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.averageProcessingTime
+    private val requestAverageProcessingTime = Duration.ofMillis(50)
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
+    private val paymentTimeout = 1500L
 
     private val maxRetries = 1
 
@@ -66,6 +70,11 @@ class PaymentExternalSystemAdapterImpl(
             .timeoutDuration(Duration.ofSeconds(1))
             .build()
     )
+
+    private val hedgedRequests: Counter = Counter
+        .builder("hedged_requests_count")
+        .register(Metrics.globalRegistry)
+
 
     fun recordPaymentAttempt(attempts: Int) {
         val label = when (attempts) {
@@ -99,68 +108,160 @@ class PaymentExternalSystemAdapterImpl(
             paymentMetrics.submissionLogged.increment()
         }
 
-        val paymentTimeout = 1000L
-
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
+        val uri = "http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"
+        coroutineScope {
+            executePaymentAsync(startTime, paymentId, transactionId, uri)
+        }
+    }
+
+    private suspend fun executePaymentAsync(
+        startTime: Long,
+        paymentId: UUID,
+        transactionId: UUID,
+        uri: String
+    ) {
         repeat(maxRetries) { attempt ->
-            try {
-                ongoingWindow.acquireAsync()
-                paymentMetrics.windowAcquired.increment()
-                RateLimiter.waitForPermission(rateLimiter);
-                if (System.currentTimeMillis() - startTime >= paymentTimeout) {
-                    logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
-                    return
-                }
-
-                paymentMetrics.rateLimiterAcquired.increment()
-                val request = HttpRequest.newBuilder()
-                    .uri(URI("http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"))
-                    .POST(HttpRequest.BodyPublishers.noBody())
-                    .timeout(Duration.ofMillis(paymentTimeout))
-                    .build()
-
-                val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
-                paymentMetrics.responseReceived.increment()
-
-                val body = try {
-                    mapper.readValue(response.body(), ExternalSysResponse::class.java)
-                } catch (e: Exception) {
-                    logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.statusCode()}, reason: ${response.body()}")
-                    ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
-                }
-                paymentMetrics.bodyRead.increment()
-
-                logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.statusCode()}, attempt: $attempt")
-
-                scope.esWriter.submit(paymentId) {
-                    // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
-                    // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(body.result, now(), transactionId, reason = body.message)
-                    }
-                    paymentMetrics.processingLogged.increment()
-                }
-
-                if (body.result) {
-                    recordPaymentAttempt(attempt)
-                    return
-                }
-            } catch (e: Exception) {
-                logger.error("[$accountName] Payment failed for $paymentId", e)
-                scope.esWriter.submit(paymentId) {
-                    paymentESService.update(paymentId) {
-                        it.logProcessing(false, now(), transactionId, reason = e.message)
-                    }
-                    paymentMetrics.processingLogged.increment()
-                }
-            } finally {
-                ongoingWindow.release()
-                val duration = System.currentTimeMillis() - startTime;
-                paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
+            if (executeRequestWithLimit(startTime, paymentId, transactionId, uri)) {
+                recordPaymentAttempt(attempt)
+                return
             }
 
             //delay(100L * (attempt + 1))
         }
+    }
+
+    private suspend fun executeRequestWithLimit(
+        startTime: Long,
+        paymentId: UUID,
+        transactionId: UUID,
+        uri: String
+    ): Boolean {
+        ongoingWindow.acquireAsync()
+        paymentMetrics.windowAcquired.increment()
+        if (System.currentTimeMillis() - startTime >= paymentTimeout) {
+            logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
+            return false
+        }
+        RateLimiter.waitForPermission(rateLimiter)
+
+        val result = executeRequestWithHedge(paymentId, transactionId, uri)
+
+        if (!result) {
+            ongoingWindow.release()
+            return false
+        }
+
+        ongoingWindow.release()
+        val duration = System.currentTimeMillis() - startTime;
+        paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
+
+        return true
+    }
+
+    private suspend fun executeRequestWithHedge(
+        paymentId: UUID,
+        transactionId: UUID,
+        uri: String
+    ): Boolean = supervisorScope {
+        val idempotencyKey = UUID.randomUUID().toString()
+
+        val primaryDeferred = async {
+            executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+        }
+
+        val hedgedDeferred1 = async {
+            //delay(requestAverageProcessingTime.toMillis())
+            if (!primaryDeferred.isCompleted) {
+                hedgedRequests.increment()
+                executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+            } else {
+                false
+            }
+        }
+
+        val hedgedDeferred2 = async {
+            //delay(requestAverageProcessingTime.toMillis())
+            if (!primaryDeferred.isCompleted) {
+                hedgedRequests.increment()
+                executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+            } else {
+                false
+            }
+        }
+
+        select {
+            primaryDeferred.onAwait { result ->
+                hedgedDeferred1.cancel()
+                hedgedDeferred2.cancel()
+                result
+            }
+            hedgedDeferred1.onAwait { result ->
+                primaryDeferred.cancel()
+                hedgedDeferred2.cancel()
+                result
+            }
+            hedgedDeferred2.onAwait { result ->
+                primaryDeferred.cancel()
+                hedgedDeferred1.cancel()
+                result
+            }
+        }
+    }
+
+    private suspend  fun executeRequestAsync(
+        paymentId: UUID,
+        transactionId: UUID,
+        idempotencyKey: String,
+        uri: String
+    ): Boolean {
+        try {
+            paymentMetrics.rateLimiterAcquired.increment()
+            val request = HttpRequest.newBuilder()
+                .uri(URI(uri))
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .header("idempotencyKey", idempotencyKey)
+                .timeout(Duration.ofMillis(paymentTimeout))
+                .build()
+
+            val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
+            paymentMetrics.responseReceived.increment()
+
+            val body = try {
+                mapper.readValue(response.body(), ExternalSysResponse::class.java)
+            } catch (e: Exception) {
+                logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.statusCode()}, reason: ${response.body()}")
+                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+            }
+            paymentMetrics.bodyRead.increment()
+
+            logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.statusCode()}")
+
+            scope.esWriter.submit(paymentId) {
+                // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
+                // Это требуется сделать ВО ВСЕХ ИСХОДАХ (успешная оплата / неуспешная / ошибочная ситуация)
+                paymentESService.update(paymentId) {
+                    it.logProcessing(body.result, now(), transactionId, reason = body.message)
+                }
+                paymentMetrics.processingLogged.increment()
+            }
+
+            if (body.result) {
+                return true
+            }
+        } catch (e: Exception) {
+            logger.error("[$accountName] Payment failed for $paymentId", e)
+            scope.esWriter.submit(paymentId) {
+                paymentESService.update(paymentId) {
+                    it.logProcessing(false, now(), transactionId, reason = e.message)
+                }
+                paymentMetrics.processingLogged.increment()
+            }
+
+            return false
+        }
+
+        return true
     }
 
     override fun price() = properties.price
