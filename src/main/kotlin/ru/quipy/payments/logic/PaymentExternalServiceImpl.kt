@@ -148,11 +148,6 @@ class PaymentExternalSystemAdapterImpl(
     ): Boolean {
         ongoingWindow.acquireAsync()
         paymentMetrics.windowAcquired.increment()
-        if (System.currentTimeMillis() - startTime >= paymentTimeout) {
-            ongoingWindow.release()
-            logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
-            return false
-        }
 
         if (!circuitBreaker.tryAcquirePermission()) {
             logger.warn("[$accountName] Circuit breaker is OPEN for $paymentId")
