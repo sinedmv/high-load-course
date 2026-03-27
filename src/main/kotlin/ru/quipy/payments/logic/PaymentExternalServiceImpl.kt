@@ -30,6 +30,9 @@ import java.util.*
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -54,7 +57,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
     private val paymentTimeout = 1500L
 
-    private val maxRetries = 4
+    private val maxRetries = 10
 
     private val client = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_2)
@@ -70,16 +73,10 @@ class PaymentExternalSystemAdapterImpl(
     )
 
     private var circuitBreakerConfig = CircuitBreakerConfig.custom()
-        .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.TIME_BASED)
-        .slidingWindowSize(1)
-        .minimumNumberOfCalls(1)
-        .failureRateThreshold(10f)
-        .slowCallRateThreshold(10f)
-        .slowCallDurationThreshold(Duration.ofMillis(100))
-        .waitDurationInOpenState(Duration.ofMillis(100))
-        .permittedNumberOfCallsInHalfOpenState(1)
-        .automaticTransitionFromOpenToHalfOpenEnabled(true)
-        .recordExceptions(Exception::class.java, HttpTimeoutException::class.java)
+        .failureRateThreshold(50f)
+        .slidingWindowSize(200)
+        .minimumNumberOfCalls(50)
+        .waitDurationInOpenState(Duration.ofSeconds(30))
         .build()
 
     private val circuitBreaker = CircuitBreaker.of("circuit-breaker", circuitBreakerConfig)
@@ -139,7 +136,7 @@ class PaymentExternalSystemAdapterImpl(
                 return
             }
 
-            //delay(100L * (attempt + 1))
+            delay(1000L * (attempt + 1))
         }
     }
 
@@ -228,7 +225,7 @@ class PaymentExternalSystemAdapterImpl(
                 paymentMetrics.processingLogged.increment()
             }
 
-            return false
+            throw e
         }
 
         return true
