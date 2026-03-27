@@ -103,7 +103,7 @@ class PaymentExternalSystemAdapterImpl(
 
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         paymentMetrics.performPaymentStartedCounter.increment()
-        val startTime = System.currentTimeMillis();
+        val startTime = now()
         logger.warn("[$accountName] Submitting payment request for payment $paymentId, avgProcessingTime: $requestAverageProcessingTime")
 
         val transactionId = UUID.randomUUID()
@@ -153,17 +153,18 @@ class PaymentExternalSystemAdapterImpl(
             logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
             return false
         }
-        RateLimiter.waitForPermission(rateLimiter)
 
-        val result = try {
-            circuitBreaker.executeSuspendFunction {
-                executeRequestAsync(paymentId, transactionId, uri)
-            }
-        } catch (e: CallNotPermittedException) {
-            logger.warn("[$accountName] Circuit breaker is open for $paymentId")
+        if (!circuitBreaker.tryAcquirePermission()) {
+            logger.warn("[$accountName] Circuit breaker is OPEN for $paymentId")
             circuitCounter.increment()
             ongoingWindow.release()
             return false
+        }
+
+        RateLimiter.waitForPermission(rateLimiter)
+
+        val result = try {
+            executeRequestAsync(paymentId, transactionId, uri)
         } catch (e: Exception) {
             logger.error("[$accountName] Unexpected error for $paymentId", e)
             ongoingWindow.release()
@@ -172,7 +173,7 @@ class PaymentExternalSystemAdapterImpl(
 
         ongoingWindow.release()
         if (result) {
-            val duration = System.currentTimeMillis() - startTime
+            val duration = now() - startTime
             paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS)
         }
         return result
@@ -183,6 +184,8 @@ class PaymentExternalSystemAdapterImpl(
         transactionId: UUID,
         uri: String
     ): Boolean {
+        val callStart = now()
+
         try {
             paymentMetrics.rateLimiterAcquired.increment()
             val request = HttpRequest.newBuilder()
@@ -194,11 +197,20 @@ class PaymentExternalSystemAdapterImpl(
             val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
             paymentMetrics.responseReceived.increment()
 
+            val requestLatency = now() - callStart
+
             val body = try {
                 mapper.readValue(response.body(), ExternalSysResponse::class.java)
             } catch (e: Exception) {
-                logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.statusCode()}, reason: ${response.body()}")
-                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                circuitBreaker.onError(requestLatency, TimeUnit.MILLISECONDS, e)
+                logger.error("[$accountName] [ERROR] Failed to parse response for txId: $transactionId, payment: $paymentId, code: ${response.statusCode()}, body: ${response.body()}")
+                scope.esWriter.submit(paymentId) {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
+                    paymentMetrics.processingLogged.increment()
+                }
+                return false
             }
             paymentMetrics.bodyRead.increment()
 
@@ -213,10 +225,14 @@ class PaymentExternalSystemAdapterImpl(
                 paymentMetrics.processingLogged.increment()
             }
 
+            // Насколько помню, считаем только это состояние успешным
             if (body.result) {
+                circuitBreaker.onSuccess(requestLatency, TimeUnit.MILLISECONDS)
                 return true
             }
         } catch (e: Exception) {
+            val requestLatency = now() - callStart
+            circuitBreaker.onError(requestLatency, TimeUnit.MILLISECONDS, e)
             logger.error("[$accountName] Payment failed for $paymentId", e)
             scope.esWriter.submit(paymentId) {
                 paymentESService.update(paymentId) {
