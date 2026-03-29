@@ -55,7 +55,7 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = Duration.ofMillis(50)
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
-    private val paymentTimeout = 15000L
+    private val paymentTimeout = 1500L
 
     private val maxRetries = 10
 
@@ -127,7 +127,7 @@ class PaymentExternalSystemAdapterImpl(
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         val uri = "http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"
         coroutineScope {
-            executePaymentAsync(startTime, paymentId, transactionId, uri)
+            executePaymentAsync(startTime, paymentId, transactionId, uri, deadline)
         }
     }
 
@@ -135,15 +135,25 @@ class PaymentExternalSystemAdapterImpl(
         startTime: Long,
         paymentId: UUID,
         transactionId: UUID,
-        uri: String
+        uri: String,
+        deadline: Long
     ) {
         repeat(maxRetries) { attempt ->
+            val remaining = deadline - now()
+            if (remaining <= 0) {
+                logger.warn("[$accountName] Deadline exceeded for $paymentId, giving up")
+                return
+            }
+
             if (executeRequestWithLimit(startTime, paymentId, transactionId, uri)) {
                 recordPaymentAttempt(attempt)
                 return
             }
 
-            delay(1000L * (attempt + 1))
+            val delayMs = 200L * (attempt + 1)
+            if (now() + delayMs < deadline) {
+                delay(delayMs)
+            }
         }
     }
 
