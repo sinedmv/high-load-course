@@ -57,7 +57,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
     private val paymentTimeout = 1500L
 
-    private val maxRetries = 10
+    private val maxRetries = 10000
 
     private val client = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_2)
@@ -139,7 +139,7 @@ class PaymentExternalSystemAdapterImpl(
         deadline: Long
     ) {
         repeat(maxRetries) { attempt ->
-            val remaining = deadline - now()
+            var remaining = deadline - now()
             if (remaining <= 0) {
                 logger.warn("[$accountName] Deadline exceeded for $paymentId, giving up")
                 return
@@ -150,9 +150,10 @@ class PaymentExternalSystemAdapterImpl(
                 return
             }
 
-            val delayMs = 200L * (attempt + 1)
+            val delayMs = minOf(200L * (1L shl minOf(attempt - 1, 10)), 5000L)
             if (now() + delayMs < deadline) {
-                delay(delayMs)
+                remaining = deadline - now()
+                delay(minOf(delayMs, remaining))
             }
         }
     }
