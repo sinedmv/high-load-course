@@ -55,7 +55,7 @@ class PaymentExternalSystemAdapterImpl(
     private val requestAverageProcessingTime = Duration.ofMillis(50)
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
-    private val paymentTimeout = 1500L
+    private val paymentTimeout = 15000L
 
     private val maxRetries = 10
 
@@ -73,10 +73,17 @@ class PaymentExternalSystemAdapterImpl(
     )
 
     private var circuitBreakerConfig = CircuitBreakerConfig.custom()
-        .failureRateThreshold(50f)
+        .failureRateThreshold(10f)
+        .slowCallRateThreshold(10f)
+        .slowCallDurationThreshold(Duration.ofMillis(1000))
+
+        .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
         .slidingWindowSize(200)
         .minimumNumberOfCalls(50)
-        .waitDurationInOpenState(Duration.ofSeconds(30))
+
+        .waitDurationInOpenState(Duration.ofSeconds(15))
+        .permittedNumberOfCallsInHalfOpenState(200)
+        .automaticTransitionFromOpenToHalfOpenEnabled(true)
         .build()
 
     private val circuitBreaker = CircuitBreaker.of("circuit-breaker", circuitBreakerConfig)
