@@ -51,8 +51,8 @@ class OrderPayer {
         val accountProperties = paymentService.getAllAccountsProperties()
         retryAfter = accountProperties.minOf { it.averageProcessingTime }.toMillis()
         val externalServiceRps = accountProperties.minOf { it.rateLimitPerSec }
-        val slaSeconds = 1.0
-        val processingTimeSeconds = 0.01
+        val slaSeconds = 10000.0
+        val processingTimeSeconds = 0.1
 
         val safeQueueTimeSeconds = (slaSeconds - processingTimeSeconds) * 0.8
         val bucketSize = (externalServiceRps * safeQueueTimeSeconds).toInt()
@@ -69,7 +69,7 @@ class OrderPayer {
             50,
             0L,
             TimeUnit.MILLISECONDS,
-            LinkedBlockingQueue(30000),
+            LinkedBlockingQueue(200000),
             NamedThreadFactory("payment-submission-executor"),
             CallerBlockingRejectedExecutionHandler()
         )

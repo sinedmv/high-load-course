@@ -2,6 +2,10 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig
+import io.github.resilience4j.kotlin.circuitbreaker.executeSuspendFunction
 import io.github.resilience4j.ratelimiter.RateLimiter
 import io.github.resilience4j.ratelimiter.RateLimiterConfig
 import io.micrometer.core.instrument.Counter
@@ -9,8 +13,6 @@ import io.micrometer.core.instrument.Metrics
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.future.await
-import kotlinx.coroutines.selects.select
-import okhttp3.internal.wait
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -18,18 +20,18 @@ import org.slf4j.LoggerFactory
 import ru.quipy.PaymentMetrics
 import ru.quipy.common.utils.OngoingWindow
 import ru.quipy.Scope
-import ru.quipy.common.utils.SlidingWindowRateLimiter
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import ru.quipy.payments.logic.PaymentExternalSystemAdapterImpl.Companion.logger
 import java.net.URI
+import java.net.http.HttpTimeoutException
 import java.time.Duration
 import java.util.*
-import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
-import kotlin.toString
+
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 
 // Advice: always treat time as a Duration
@@ -55,12 +57,11 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
     private val paymentTimeout = 1500L
 
-    private val maxRetries = 1
+    private val maxRetries = 10000
 
     private val client = HttpClient.newBuilder()
         .version(HttpClient.Version.HTTP_2)
         .build()
-//    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1));
     private val ongoingWindow = OngoingWindow(parallelRequests)
     private val rateLimiter: RateLimiter = RateLimiter.of(
         "payments-$accountName",
@@ -71,8 +72,23 @@ class PaymentExternalSystemAdapterImpl(
             .build()
     )
 
-    private val hedgedRequests: Counter = Counter
-        .builder("hedged_requests_count")
+    private var circuitBreakerConfig = CircuitBreakerConfig.custom()
+        .failureRateThreshold(10f)
+        .slowCallRateThreshold(10f)
+        .slowCallDurationThreshold(Duration.ofMillis(1000))
+
+        .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
+        .slidingWindowSize(200)
+        .minimumNumberOfCalls(50)
+
+        .waitDurationInOpenState(Duration.ofSeconds(15))
+        .permittedNumberOfCallsInHalfOpenState(200)
+        .automaticTransitionFromOpenToHalfOpenEnabled(true)
+        .build()
+
+    private val circuitBreaker = CircuitBreaker.of("circuit-breaker", circuitBreakerConfig)
+    private var circuitCounter: Counter = Counter
+        .builder("circuit-count")
         .register(Metrics.globalRegistry)
 
 
@@ -94,7 +110,7 @@ class PaymentExternalSystemAdapterImpl(
 
     override suspend fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         paymentMetrics.performPaymentStartedCounter.increment()
-        val startTime = System.currentTimeMillis();
+        val startTime = now()
         logger.warn("[$accountName] Submitting payment request for payment $paymentId, avgProcessingTime: $requestAverageProcessingTime")
 
         val transactionId = UUID.randomUUID()
@@ -111,7 +127,7 @@ class PaymentExternalSystemAdapterImpl(
         logger.info("[$accountName] Submit: $paymentId , txId: $transactionId")
         val uri = "http://$paymentProviderHostPort/external/process?serviceName=$serviceName&token=$token&accountName=$accountName&transactionId=$transactionId&paymentId=$paymentId&amount=$amount"
         coroutineScope {
-            executePaymentAsync(startTime, paymentId, transactionId, uri)
+            executePaymentAsync(startTime, paymentId, transactionId, uri, deadline)
         }
     }
 
@@ -119,15 +135,26 @@ class PaymentExternalSystemAdapterImpl(
         startTime: Long,
         paymentId: UUID,
         transactionId: UUID,
-        uri: String
+        uri: String,
+        deadline: Long
     ) {
         repeat(maxRetries) { attempt ->
+            var remaining = deadline - now()
+            if (remaining <= 0) {
+                logger.warn("[$accountName] Deadline exceeded for $paymentId, giving up")
+                return
+            }
+
             if (executeRequestWithLimit(startTime, paymentId, transactionId, uri)) {
                 recordPaymentAttempt(attempt)
                 return
             }
 
-            //delay(100L * (attempt + 1))
+            val delayMs = minOf(200L * (1L shl minOf(attempt - 1, 10)), 5000L)
+            if (now() + delayMs < deadline) {
+                remaining = deadline - now()
+                delay(minOf(delayMs, remaining))
+            }
         }
     }
 
@@ -139,99 +166,64 @@ class PaymentExternalSystemAdapterImpl(
     ): Boolean {
         ongoingWindow.acquireAsync()
         paymentMetrics.windowAcquired.increment()
-        if (System.currentTimeMillis() - startTime >= paymentTimeout) {
-            logger.warn("[$accountName] Deadline approaching, stopping retries for $paymentId")
+
+        if (!circuitBreaker.tryAcquirePermission()) {
+            logger.warn("[$accountName] Circuit breaker is OPEN for $paymentId")
+            circuitCounter.increment()
+            ongoingWindow.release()
             return false
         }
+
         RateLimiter.waitForPermission(rateLimiter)
 
-        val result = executeRequestWithHedge(paymentId, transactionId, uri)
-
-        if (!result) {
+        val result = try {
+            executeRequestAsync(paymentId, transactionId, uri)
+        } catch (e: Exception) {
+            logger.error("[$accountName] Unexpected error for $paymentId", e)
             ongoingWindow.release()
             return false
         }
 
         ongoingWindow.release()
-        val duration = System.currentTimeMillis() - startTime;
-        paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS);
-
-        return true
-    }
-
-    private suspend fun executeRequestWithHedge(
-        paymentId: UUID,
-        transactionId: UUID,
-        uri: String
-    ): Boolean = supervisorScope {
-        val idempotencyKey = UUID.randomUUID().toString()
-
-        val primaryDeferred = async {
-            executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
+        if (result) {
+            val duration = now() - startTime
+            paymentMetrics.paymentOperationDurationTimer.record(duration, TimeUnit.MILLISECONDS)
         }
-
-        val hedgedDeferred1 = async {
-            //delay(requestAverageProcessingTime.toMillis())
-            if (!primaryDeferred.isCompleted) {
-                hedgedRequests.increment()
-                executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
-            } else {
-                false
-            }
-        }
-
-        val hedgedDeferred2 = async {
-            //delay(requestAverageProcessingTime.toMillis())
-            if (!primaryDeferred.isCompleted) {
-                hedgedRequests.increment()
-                executeRequestAsync(paymentId, transactionId, idempotencyKey, uri)
-            } else {
-                false
-            }
-        }
-
-        select {
-            primaryDeferred.onAwait { result ->
-                hedgedDeferred1.cancel()
-                hedgedDeferred2.cancel()
-                result
-            }
-            hedgedDeferred1.onAwait { result ->
-                primaryDeferred.cancel()
-                hedgedDeferred2.cancel()
-                result
-            }
-            hedgedDeferred2.onAwait { result ->
-                primaryDeferred.cancel()
-                hedgedDeferred1.cancel()
-                result
-            }
-        }
+        return result
     }
 
     private suspend  fun executeRequestAsync(
         paymentId: UUID,
         transactionId: UUID,
-        idempotencyKey: String,
         uri: String
     ): Boolean {
+        val callStart = now()
+
         try {
             paymentMetrics.rateLimiterAcquired.increment()
             val request = HttpRequest.newBuilder()
                 .uri(URI(uri))
                 .POST(HttpRequest.BodyPublishers.noBody())
-                .header("idempotencyKey", idempotencyKey)
                 .timeout(Duration.ofMillis(paymentTimeout))
                 .build()
 
             val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
             paymentMetrics.responseReceived.increment()
 
+            val requestLatency = now() - callStart
+
             val body = try {
                 mapper.readValue(response.body(), ExternalSysResponse::class.java)
             } catch (e: Exception) {
-                logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.statusCode()}, reason: ${response.body()}")
-                ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
+                circuitBreaker.onError(requestLatency, TimeUnit.MILLISECONDS, e)
+                logger.error("[$accountName] [ERROR] Failed to parse response for txId: $transactionId, payment: $paymentId, code: ${response.statusCode()}, body: ${response.body()}")
+                scope.esWriter.submit(paymentId) {
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
+                    paymentMetrics.processingLogged.increment()
+                }
+                return false
             }
             paymentMetrics.bodyRead.increment()
 
@@ -246,10 +238,14 @@ class PaymentExternalSystemAdapterImpl(
                 paymentMetrics.processingLogged.increment()
             }
 
+            // Насколько помню, считаем только это состояние успешным
             if (body.result) {
+                circuitBreaker.onSuccess(requestLatency, TimeUnit.MILLISECONDS)
                 return true
             }
         } catch (e: Exception) {
+            val requestLatency = now() - callStart
+            circuitBreaker.onError(requestLatency, TimeUnit.MILLISECONDS, e)
             logger.error("[$accountName] Payment failed for $paymentId", e)
             scope.esWriter.submit(paymentId) {
                 paymentESService.update(paymentId) {
@@ -258,7 +254,7 @@ class PaymentExternalSystemAdapterImpl(
                 paymentMetrics.processingLogged.increment()
             }
 
-            return false
+            throw e
         }
 
         return true
